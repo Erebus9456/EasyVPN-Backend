@@ -1,26 +1,11 @@
 import os
 import sys
-import subprocess
-
-# --- EMERGENCY DEBUG PRINT ---
-print("--- SCRIPT INITIALIZING ---")
-
-# --- CHECK DEPENDENCIES BEFORE IMPORTS ---
-try:
-    import requests
-    from dotenv import load_dotenv
-    from flask import Flask
-    print("--- DEPENDENCIES VERIFIED ---")
-except ImportError as e:
-    print(f"--- ERROR: Missing Dependency: {e} ---")
-    print("Attempting emergency repair...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "python-dotenv", "requests", "flask", "gunicorn", "--break-system-packages"])
-    print("Please restart the script now.")
-    sys.exit(1)
-
 import json
 import logging
-from datetime import datetime
+import subprocess
+import requests
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 
 # --- PATHS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,15 +17,9 @@ WG_CONF = "/etc/wireguard/wg0.conf"
 class Colors:
     CYAN, GREEN, YELLOW, RED, BOLD, END = '\033[96m', '\033[92m', '\033[93m', '\033[91m', '\033[1m', '\033[0m'
 
-# Initialize Logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s %(message)s', 
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
 
 def run_command(cmd):
-    logging.info(f"Executing: {cmd}")
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         return f"ERROR: {result.stderr.strip()}"
@@ -53,15 +32,15 @@ def save_state(data):
         json.dump(state, f, indent=4)
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r') as f:
-            return json.load(f)
-    return {}
+    return json.load(open(STATE_FILE, 'r')) if os.path.exists(STATE_FILE) else {}
 
 def setup_system():
-    print(f"{Colors.CYAN}[1/5] Installing System Dependencies...{Colors.END}")
-    run_command("apt update && apt install -y wireguard curl iptables gunicorn")
+    print(f"{Colors.CYAN}[1/5] Installing System & Python Dependencies...{Colors.END}")
+    # We install python3-flask, python3-dotenv, python3-requests via APT to bypass PEP 668 restrictions
+    run_command("apt update")
+    run_command("apt install -y wireguard curl iptables gunicorn python3-flask python3-dotenv python3-requests")
     save_state({"deps_installed": True})
+    print(f"{Colors.GREEN}[✓] Dependencies installed via APT.{Colors.END}")
 
 def setup_networking():
     print(f"{Colors.CYAN}[2/5] Configuring NAT & Forwarding...{Colors.END}")
@@ -93,9 +72,7 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -
 
 def setup_agent_service():
     print(f"{Colors.CYAN}[4/5] Deploying Flask Agent Service...{Colors.END}")
-    gunicorn_path = run_command("which gunicorn")
-    if "ERROR" in gunicorn_path or not gunicorn_path:
-        gunicorn_path = "/usr/bin/gunicorn"
+    gunicorn_path = run_command("which gunicorn") or "/usr/bin/gunicorn"
 
     service_content = f"""[Unit]
 Description=EasyVPN Node Agent
@@ -117,37 +94,48 @@ WantedBy=multi-user.target
     run_command("systemctl daemon-reload")
     run_command("systemctl enable easyvpn-agent")
     run_command("systemctl restart easyvpn-agent")
-    print(f"{Colors.GREEN}[✓] Service configuration written.{Colors.END}")
+    print(f"{Colors.GREEN}[✓] Agent Service Active.{Colors.END}")
 
 def register_supabase():
-    print(f"{Colors.CYAN}[5/5] Syncing with Supabase...{Colors.END}")
+    print(f"{Colors.CYAN}[5/5] Syncing with Supabase (Upsert)...{Colors.END}")
     if not os.path.exists(ENV_FILE):
-        print(f"{Colors.RED}Skipping Supabase: .env not found{Colors.END}")
+        print(f"{Colors.RED}Error: .env missing, cannot register.{Colors.END}")
         return
-    
+
     load_dotenv(ENV_FILE)
     state = load_state()
+    
+    # Modern UTC timestamp
+    now = datetime.now(timezone.utc).isoformat()
+    
     payload = {
         "name": os.getenv("SERVER_NAME"),
         "region": os.getenv("SERVER_REGION"),
         "public_ip": state.get("public_ip"),
         "wireguard_public_key": state.get("public_key"),
         "status": "online",
-        "last_heartbeat": datetime.utcnow().isoformat()
+        "last_heartbeat": now
     }
+    
+    # To perform an UPSERT in Supabase (PostgREST), we use POST with specific headers
     headers = {
         "apikey": os.getenv("SUPABASE_KEY"), 
         "Authorization": f"Bearer {os.getenv('SUPABASE_KEY')}", 
         "Content-Type": "application/json", 
-        "Prefer": "resolution=merge-duplicates"
+        "Prefer": "resolution=merge-duplicates" # This handles the 'Unique IP' constraint error
     }
     
+    url = f"{os.getenv('SUPABASE_URL')}/rest/v1/vpn_servers"
+    
     try:
-        url = f"{os.getenv('SUPABASE_URL')}/rest/v1/vpn_servers"
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        print(f"Supabase Response: {res.status_code}")
+        # We use on_conflict query param to tell Supabase which column to check for duplicates
+        res = requests.post(f"{url}?on_conflict=public_ip", headers=headers, json=payload)
+        if res.status_code not in [200, 201]:
+            print(f"{Colors.RED}Supabase Error: {res.text}{Colors.END}")
+        else:
+            print(f"{Colors.GREEN}[✓] Server Registered/Updated successfully.{Colors.END}")
     except Exception as e:
-        print(f"Supabase failed: {e}")
+        print(f"{Colors.RED}Request failed: {e}{Colors.END}")
 
 def main():
     while True:
@@ -155,28 +143,25 @@ def main():
         print("1. Full Setup (Fresh Install)")
         print("2. Run Diagnostics")
         print("3. View Logs")
-        print("4. Restart Agent Service")
-        print("5. Exit")
+        print("4. Exit")
         choice = input("\nSelect: ")
         
-        if choice == '1':
-            setup_system()
-            setup_networking()
-            setup_wireguard()
-            setup_agent_service()
-            register_supabase()
-        elif choice == '2':
-            print(f"WG: {run_command('systemctl is-active wg-quick@wg0')}")
-            print(f"Agent: {run_command('systemctl is-active easyvpn-agent')}")
-        elif choice == '3':
-            if os.path.exists(LOG_FILE):
+        try:
+            if choice == '1':
+                setup_system()
+                setup_networking()
+                setup_wireguard()
+                setup_agent_service()
+                register_supabase()
+            elif choice == '2':
+                print(f"WG: {run_command('systemctl is-active wg-quick@wg0')}")
+                print(f"Agent: {run_command('systemctl is-active easyvpn-agent')}")
+            elif choice == '3':
                 os.system(f"tail -n 20 {LOG_FILE}")
-            else:
-                print("No log file found yet.")
-        elif choice == '4':
-            run_command("systemctl restart easyvpn-agent")
-        elif choice == '5':
-            break
+            elif choice == '4':
+                break
+        except Exception as e:
+            print(f"{Colors.RED}Error: {e}{Colors.END}")
 
 if __name__ == "__main__":
     main()
