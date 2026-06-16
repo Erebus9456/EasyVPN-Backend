@@ -39,9 +39,9 @@ else
     echo -e "${GREEN}✓ Pip3 is installed.${NC}"
 fi
 
-# NEW: Install Python Library Dependencies
+# NEW: Install Python Library Dependencies using --break-system-packages
 echo -e "${YELLOW}Installing Python library dependencies (dotenv, requests, flask)...${NC}"
-pip3 install python-dotenv requests flask gunicorn --quiet
+pip3 install python-dotenv requests flask gunicorn --quiet --break-system-packages
 echo -e "${GREEN}✓ Python libraries ready.${NC}"
 
 echo -e "\n${YELLOW}[2/3] Checking configuration...${NC}"

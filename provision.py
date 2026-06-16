@@ -35,9 +35,8 @@ def load_state():
     return json.load(open(STATE_FILE, 'r')) if os.path.exists(STATE_FILE) else {}
 
 def setup_system():
-    print(f"{Colors.CYAN}[1/5] Installing Dependencies...{Colors.END}")
-    run_command("apt update && apt install -y wireguard curl iptables python3-pip gunicorn")
-    run_command("pip3 install flask python-dotenv requests")
+    print(f"{Colors.CYAN}[1/5] Installing System Dependencies...{Colors.END}")
+    run_command("apt update && apt install -y wireguard curl iptables gunicorn")
     save_state({"deps_installed": True})
 
 def setup_networking():
@@ -53,7 +52,9 @@ def setup_wireguard():
     priv = state.get("private_key") or run_command("wg genkey")
     pub = state.get("public_key") or run_command(f"echo '{priv}' | wg pubkey")
     ip = run_command("curl -s https://icanhazip.com")
-    iface = run_command("ip route get 8.8.8.8 | grep -Po '(?<=dev )(\S+)'")
+    
+    # FIXED: Added 'r' prefix to treat as raw string to avoid \S warning
+    iface = run_command(r"ip route get 8.8.8.8 | grep -Po '(?<=dev )(\S+)'")
 
     config = f"""[Interface]
 PrivateKey = {priv}
