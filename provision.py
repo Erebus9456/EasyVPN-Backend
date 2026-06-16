@@ -7,16 +7,91 @@ import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-# --- PATHS ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(BASE_DIR, "state.json")
-LOG_FILE = os.path.join(BASE_DIR, "vpn-setup.log")
-ENV_FILE = os.path.join(BASE_DIR, ".env")
-WG_CONF = "/etc/wireguard/wg0.conf"
+# --- DYNAMIC PATH INITIALIZATION ---
+# Get the absolute path of the directory containing this script
+DEFAULT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class Colors:
     CYAN, GREEN, YELLOW, RED, BOLD, END = '\033[96m', '\033[92m', '\033[93m', '\033[91m', '\033[1m', '\033[0m'
 
+# We will set these globally after path validation
+BASE_DIR = DEFAULT_BASE_DIR
+STATE_FILE = ""
+LOG_FILE = ""
+ENV_FILE = ""
+WG_CONF = "/etc/wireguard/wg0.conf"
+
+def initialize_paths(custom_env_path=None):
+    global BASE_DIR, STATE_FILE, LOG_FILE, ENV_FILE
+    if custom_env_path:
+        ENV_FILE = custom_env_path
+        BASE_DIR = os.path.dirname(os.path.abspath(ENV_FILE))
+    else:
+        ENV_FILE = os.path.join(DEFAULT_BASE_DIR, ".env")
+        BASE_DIR = DEFAULT_BASE_DIR
+
+    STATE_FILE = os.path.join(BASE_DIR, "state.json")
+    LOG_FILE = os.path.join(BASE_DIR, "vpn-setup.log")
+
+def ensure_env_exists():
+    global ENV_FILE
+    # Try default path first
+    initialize_paths()
+    
+    if os.path.exists(ENV_FILE):
+        print(f"{Colors.GREEN}[✓] Found .env at: {ENV_FILE}{Colors.END}")
+        return True
+
+    print(f"{Colors.YELLOW}[!] .env file not found at default path: {ENV_FILE}{Colors.END}")
+    print("How would you like to proceed?")
+    print("1. Enter absolute path to existing .env file")
+    print("2. Create a new .env file interactively")
+    print("3. Exit")
+    
+    choice = input("Select (1-3): ")
+    
+    if choice == '1':
+        path = input("Enter full path (e.g. /root/EasyVPN-Backend/.env): ").strip()
+        if os.path.exists(path):
+            initialize_paths(path)
+            return True
+        else:
+            print(f"{Colors.RED}Path does not exist. Exiting.{Colors.END}")
+            sys.exit(1)
+            
+    elif choice == '2':
+        sb_url = input("Enter SUPABASE_URL: ").strip()
+        sb_key = input("Enter SUPABASE_KEY: ").strip()
+        region = input("Enter SERVER_REGION: ").strip()
+        name = input("Enter SERVER_NAME: ").strip()
+        token = input("Enter API_TOKEN (or press enter for random): ").strip()
+        if not token:
+            import secrets
+            token = secrets.token_urlsafe(24)
+            print(f"Generated Token: {token}")
+        
+        # Determine where to save it
+        save_dir = input(f"Enter directory to save .env [default: {DEFAULT_BASE_DIR}]: ").strip() or DEFAULT_BASE_DIR
+        os.makedirs(save_dir, exist_ok=True)
+        ENV_FILE = os.path.join(save_dir, ".env")
+        
+        with open(ENV_FILE, "w") as f:
+            f.write(f"SUPABASE_URL={sb_url}\n")
+            f.write(f"SUPABASE_KEY={sb_key}\n")
+            f.write(f"SERVER_REGION={region}\n")
+            f.write(f"SERVER_NAME={name}\n")
+            f.write(f"API_TOKEN={token}\n")
+        
+        initialize_paths(ENV_FILE)
+        print(f"{Colors.GREEN}[✓] .env created at {ENV_FILE}{Colors.END}")
+        return True
+    else:
+        sys.exit(0)
+
+# Initialize paths immediately
+ensure_env_exists()
+
+# Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
 
 # --- UTILITIES ---
@@ -45,8 +120,13 @@ def setup_system():
     save_state({"deps_installed": True})
 
 def setup_networking():
-    print(f"{Colors.CYAN}[2/5] Configuring NAT & Forwarding...{Colors.END}")
+    print(f"{Colors.CYAN}[2/5] Configuring NAT & Azure Firewall Rules...{Colors.END}")
     run_command("sysctl -w net.ipv4.ip_forward=1")
+    
+    # OS level firewall rules (Iptables)
+    run_command("iptables -I INPUT 1 -p tcp --dport 5000 -j ACCEPT")
+    run_command("iptables -I INPUT 1 -p udp --dport 51820 -j ACCEPT")
+    
     with open("/etc/sysctl.d/99-vpn.conf", "w") as f:
         f.write("net.ipv4.ip_forward=1\n")
     save_state({"networking_ready": True})
@@ -93,7 +173,6 @@ WantedBy=multi-user.target
 
 def register_supabase():
     print(f"{Colors.CYAN}[5/5] Syncing with Supabase (Upsert)...{Colors.END}")
-    if not os.path.exists(ENV_FILE): return
     load_dotenv(ENV_FILE)
     state = load_state()
     now = datetime.now(timezone.utc).isoformat()
@@ -105,13 +184,23 @@ def register_supabase():
         "status": "online",
         "last_heartbeat": now
     }
-    headers = {"apikey": os.getenv("SUPABASE_KEY"), "Authorization": f"Bearer {os.getenv('SUPABASE_KEY')}", "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+    headers = {
+        "apikey": os.getenv("SUPABASE_KEY"), 
+        "Authorization": f"Bearer {os.getenv('SUPABASE_KEY')}", 
+        "Content-Type": "application/json", 
+        "Prefer": "resolution=merge-duplicates"
+    }
     url = f"{os.getenv('SUPABASE_URL')}/rest/v1/vpn_servers"
     try:
-        requests.post(f"{url}?on_conflict=public_ip", headers=headers, json=payload, timeout=5)
-    except: pass
+        res = requests.post(f"{url}?on_conflict=public_ip", headers=headers, json=payload, timeout=10)
+        if res.status_code in [200, 201]:
+            print(f"{Colors.GREEN}[✓] Supabase Registered Successfully.{Colors.END}")
+        else:
+            print(f"{Colors.RED}Supabase Error: {res.text}{Colors.END}")
+    except Exception as e:
+        print(f"{Colors.RED}Request to Supabase failed: {e}{Colors.END}")
 
-# --- NEW DASHBOARD FEATURES ---
+# --- DASHBOARD FEATURES ---
 
 def check_local_status():
     print(f"\n{Colors.BOLD}🔍 Checking Local Server Status...{Colors.END}")
@@ -130,14 +219,7 @@ def check_network_diagnostics():
     
     print(f"\n{Colors.BOLD}🌎 Checking Global Connectivity Diagnostics...{Colors.END}")
     
-    # 1. Local Check
-    local_ok = False
-    try:
-        requests.get("http://127.0.0.1:5000/health", timeout=2)
-        local_ok = True
-        print(f" - Local API (127.0.0.1:5000): {Colors.GREEN}OK{Colors.END}")
-    except:
-        print(f" - Local API (127.0.0.1:5000): {Colors.RED}FAIL{Colors.END}")
+    local_ok = check_local_status()
 
     # 2. Global Check
     global_ok = False
@@ -148,41 +230,31 @@ def check_network_diagnostics():
     except:
         print(f" - Global API ({public_ip}:5000): {Colors.RED}FAIL{Colors.END}")
 
-    # 3. Interpretation
     if local_ok and not global_ok:
         print(f"\n{Colors.YELLOW}[!] ALERT: Firewall Block Detected!{Colors.END}")
         print(f"The service is running fine locally, but cannot be reached from the internet.")
-        print(f"👉 {Colors.BOLD}ACTION REQUIRED:{Colors.END} Go to your VPS Provider Dashboard (AWS, GCP, etc.)")
-        print(f"and open {Colors.BOLD}TCP Port 5000{Colors.END} in the Security Group/Firewall settings.")
+        print(f"👉 {Colors.BOLD}ACTION REQUIRED:{Colors.END} Go to your Azure NSG (Network Security Group)")
+        print(f"and fix the Inbound rule for {Colors.BOLD}Port 5000 (Source: Any, Port: *, Dest: 5000){Colors.END}")
     elif not local_ok:
-        print(f"\n{Colors.RED}[!] Service Issue: The API server itself is down or crashing.{Colors.END}")
+        print(f"\n{Colors.RED}[!] Service Issue: The API server is down.{Colors.END}")
     else:
-        print(f"\n{Colors.GREEN}[✓] Everything is working perfectly!{Colors.END}")
+        print(f"\n{Colors.GREEN}[✓] Global connection confirmed!{Colors.END}")
 
 def manage_service(action):
     print(f"\n{Colors.BOLD}[*] Performing {action} on Agent Server...{Colors.END}")
-    
     if action == "START":
-        is_active = run_command("systemctl is-active easyvpn-agent")
-        if is_active == "active":
-            print(f"{Colors.GREEN}Server is already UP.{Colors.END}")
-        else:
-            run_command("systemctl start easyvpn-agent")
-            print(f"{Colors.GREEN}Server STARTED.{Colors.END}")
-            
+        run_command("systemctl start easyvpn-agent")
+        print(f"{Colors.GREEN}Start command sent.{Colors.END}")
     elif action == "STOP":
-        is_active = run_command("systemctl is-active easyvpn-agent")
-        if is_active == "active":
-            run_command("systemctl stop easyvpn-agent")
-            print(f"{Colors.YELLOW}Server STOPPED.{Colors.END}")
-        else:
-            print(f"{Colors.YELLOW}Server is already DOWN.{Colors.END}")
+        run_command("systemctl stop easyvpn-agent")
+        print(f"{Colors.YELLOW}Stop command sent.{Colors.END}")
 
 # --- MAIN MENU ---
 
 def main():
     while True:
         print(f"\n{Colors.BOLD}{Colors.CYAN}⚡ EASYVPN-BACKEND CONTROL PANEL ⚡{Colors.END}")
+        print(f"Config: {ENV_FILE}")
         print("1. Full Setup (Fresh Install)")
         print("2. Run General Diagnostics")
         print("3. View Logs")
@@ -203,7 +275,10 @@ def main():
                 print(f"WG: {run_command('systemctl is-active wg-quick@wg0')}")
                 print(f"Agent: {run_command('systemctl is-active easyvpn-agent')}")
             elif choice == '3':
-                os.system(f"tail -n 20 {LOG_FILE}")
+                if os.path.exists(LOG_FILE):
+                    os.system(f"tail -n 20 {LOG_FILE}")
+                else:
+                    print(f"{Colors.YELLOW}Log file not found.{Colors.END}")
             elif choice == '4':
                 check_local_status()
             elif choice == '5':
