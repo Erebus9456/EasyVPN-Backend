@@ -98,6 +98,7 @@ Provisioning scripts can be safely re-run without creating duplicate configurati
 * 🌍 Automatic node discovery
 * 🔐 Secure WireGuard peer management
 * ⚡ Instant peer activation without VPN restart
+* 🔄 Peer key rotation via `/replace-peer` (refresh config without changing VPN IP)
 * 📡 Centralized server registry
 * 🔄 Automatic service recovery
 * 🧠 Dynamic IP allocation

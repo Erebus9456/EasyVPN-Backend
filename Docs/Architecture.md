@@ -143,6 +143,8 @@ sequenceDiagram
     Backend-->>User: WireGuard config
 ```
 
+To rotate a client's keys without changing their VPN IP, the backend calls `POST /replace-peer` with the old and new public keys.
+
 ---
 
 ## Networking Model

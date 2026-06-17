@@ -51,6 +51,64 @@ def get_next_ip():
         f.truncate()
         return f"10.0.0.{next_ip}"
 
+def _parse_config_peers():
+    """Returns (interface_section, list of peer dicts with public_key and allowed_ips)."""
+    if not os.path.exists(WG_CONF_PATH):
+        return "", []
+
+    with open(WG_CONF_PATH, "r") as f:
+        content = f.read()
+
+    sections = content.split("[Peer]")
+    interface_section = sections[0]
+    peers = []
+
+    for section in sections[1:]:
+        public_key = None
+        allowed_ips = None
+        for line in section.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("PublicKey"):
+                public_key = line.split("=", 1)[1].strip()
+            elif line.startswith("AllowedIPs"):
+                allowed_ips = line.split("=", 1)[1].strip()
+        if public_key and allowed_ips:
+            peers.append({"public_key": public_key, "allowed_ips": allowed_ips})
+
+    return interface_section, peers
+
+def find_peer_ip(public_key):
+    """Find a peer's IP by public key in wg0.conf."""
+    _, peers = _parse_config_peers()
+    for peer in peers:
+        if peer["public_key"] == public_key:
+            return peer["allowed_ips"].removesuffix("/32")
+    return None
+
+def remove_peer_from_config(public_key):
+    """Remove a peer section from wg0.conf."""
+    interface_section, peers = _parse_config_peers()
+    remaining = [p for p in peers if p["public_key"] != public_key]
+
+    with open(WG_CONF_PATH, "w") as f:
+        f.write(interface_section.rstrip())
+        for peer in remaining:
+            f.write(f"\n[Peer]\nPublicKey = {peer['public_key']}\nAllowedIPs = {peer['allowed_ips']}\n")
+
+def peer_exists(public_key):
+    _, peers = _parse_config_peers()
+    return any(p["public_key"] == public_key for p in peers)
+
+def build_peer_response(state, client_ip):
+    return {
+        "status": "success",
+        "client_ip": client_ip,
+        "server_public_key": state["public_key"],
+        "endpoint": f"{state['public_ip']}:51820",
+        "dns": "1.1.1.1",
+        "allowed_ips": "0.0.0.0/0"
+    }
+
 @app.route('/add-peer', methods=['POST'])
 def add_peer():
     token = request.headers.get("X-API-TOKEN")
@@ -76,14 +134,45 @@ def add_peer():
         with open(WG_CONF_PATH, "a") as f:
             f.write(f"\n[Peer]\nPublicKey = {client_pubkey}\nAllowedIPs = {client_ip}/32\n")
 
-        return jsonify({
-            "status": "success",
-            "client_ip": client_ip,
-            "server_public_key": state["public_key"],
-            "endpoint": f"{state['public_ip']}:51820",
-            "dns": "1.1.1.1",
-            "allowed_ips": "0.0.0.0/0"
-        })
+        return jsonify(build_peer_response(state, client_ip))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/replace-peer', methods=['POST'])
+def replace_peer():
+    token = request.headers.get("X-API-TOKEN")
+    if not token or token != API_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json
+    old_pubkey = data.get("old_public_key")
+    new_pubkey = data.get("public_key")
+    if not old_pubkey or not new_pubkey:
+        return jsonify({"error": "Missing old_public_key or public_key"}), 400
+
+    if old_pubkey == new_pubkey:
+        return jsonify({"error": "old_public_key and public_key must differ"}), 400
+
+    state = load_server_metadata()
+    if not state:
+        return jsonify({"error": "Server not provisioned"}), 500
+
+    client_ip = find_peer_ip(old_pubkey)
+    if not client_ip:
+        return jsonify({"error": "Peer not found"}), 404
+
+    if peer_exists(new_pubkey):
+        return jsonify({"error": "public_key already in use"}), 409
+
+    try:
+        subprocess.run(["wg", "set", "wg0", "peer", old_pubkey, "remove"], check=True)
+        remove_peer_from_config(old_pubkey)
+
+        subprocess.run(["wg", "set", "wg0", "peer", new_pubkey, "allowed-ips", f"{client_ip}/32"], check=True)
+        with open(WG_CONF_PATH, "a") as f:
+            f.write(f"\n[Peer]\nPublicKey = {new_pubkey}\nAllowedIPs = {client_ip}/32\n")
+
+        return jsonify(build_peer_response(state, client_ip))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

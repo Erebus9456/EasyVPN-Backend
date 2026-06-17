@@ -70,6 +70,7 @@ X-API-TOKEN: <secret>
 The API token protects:
 
 * `/add-peer`
+* `/replace-peer`
 * Peer management actions
 * WireGuard modifications
 

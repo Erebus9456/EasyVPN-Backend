@@ -125,7 +125,43 @@ curl -X POST http://<VPS_IP>:5000/add-peer \
 
 ---
 
-## 4. WireGuard Interface Not Found
+## 4. `/replace-peer` Returns Error
+
+### Symptoms
+
+* Key rotation or config refresh fails
+* API returns `404` or `409`
+
+### Possible Causes
+
+* Missing `X-API-TOKEN`
+* `old_public_key` does not match any existing peer
+* `public_key` is already assigned to another peer
+* `old_public_key` and `public_key` are the same
+
+### Fix
+
+### Check request format:
+
+```bash id="tr07b"
+curl -X POST http://<VPS_IP>:5000/replace-peer \
+  -H "X-API-TOKEN: your_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "old_public_key": "OLD_CLIENT_KEY",
+    "public_key": "NEW_CLIENT_KEY"
+  }'
+```
+
+Verify the old peer exists in the WireGuard config:
+
+```bash id="tr07c"
+wg show wg0
+```
+
+---
+
+## 5. WireGuard Interface Not Found
 
 ### Symptoms
 
@@ -148,7 +184,7 @@ ip a | grep wg0
 
 ---
 
-## 5. High Latency or Slow VPN
+## 6. High Latency or Slow VPN
 
 ### Possible Causes
 
@@ -164,7 +200,7 @@ ip a | grep wg0
 
 ---
 
-## 6. Peer Not Connecting
+## 7. Peer Not Connecting
 
 ### Symptoms
 
@@ -189,7 +225,7 @@ Re-generate client config from backend.
 
 ---
 
-## 7. Agent Service Crashed
+## 8. Agent Service Crashed
 
 ### Symptoms
 
@@ -218,7 +254,7 @@ systemctl enable easyvpn-agent
 
 ---
 
-## 8. Supabase Sync Issues
+## 9. Supabase Sync Issues
 
 ### Symptoms
 
@@ -246,7 +282,7 @@ systemctl restart easyvpn-agent
 
 ---
 
-## 9. No Internet Through VPN
+## 10. No Internet Through VPN
 
 ### Symptoms
 
@@ -273,7 +309,7 @@ iptables -t nat -L -n -v
 
 ---
 
-## 10. Complete Reset (Last Resort)
+## 11. Complete Reset (Last Resort)
 
 If everything breaks:
 

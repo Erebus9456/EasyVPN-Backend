@@ -17,6 +17,7 @@ http://<vps-ip>:5000
 This API is used exclusively by the EasyVPN backend to:
 
 * Add VPN peers
+* Replace existing peers (key rotation / config refresh)
 * Assign IP addresses
 * Update WireGuard configuration
 * Persist node state
@@ -87,8 +88,11 @@ The peer is:
 ```json id="res01"
 {
   "status": "success",
-  "assigned_ip": "10.0.0.5",
-  "server_public_key": "SERVER_WIREGUARD_PUBLIC_KEY"
+  "client_ip": "10.0.0.5",
+  "server_public_key": "SERVER_WIREGUARD_PUBLIC_KEY",
+  "endpoint": "203.0.113.10:51820",
+  "dns": "1.1.1.1",
+  "allowed_ips": "0.0.0.0/0"
 }
 ```
 
@@ -111,7 +115,85 @@ wg set wg0 peer <PUBLIC_KEY> allowed-ips <IP>/32
 
 ---
 
-## 2. Health Check
+## 2. Replace Peer
+
+### Endpoint
+
+```http id="ep04"
+POST /replace-peer
+```
+
+---
+
+### Description
+
+Replaces an existing WireGuard peer with a new public key while keeping the same internal VPN IP.
+
+Use this when a user wants to refresh their WireGuard config or rotate keys without losing their assigned address.
+
+The replacement is:
+
+* Applied instantly (no restart required)
+* Persisted to `wg0.conf`
+* Reflected in the WireGuard runtime config
+
+---
+
+### Request Body
+
+```json id="req02"
+{
+  "old_public_key": "OLD_CLIENT_WIREGUARD_PUBLIC_KEY",
+  "public_key": "NEW_CLIENT_WIREGUARD_PUBLIC_KEY"
+}
+```
+
+---
+
+### Response
+
+```json id="res04"
+{
+  "status": "success",
+  "client_ip": "10.0.0.5",
+  "server_public_key": "SERVER_WIREGUARD_PUBLIC_KEY",
+  "endpoint": "203.0.113.10:51820",
+  "dns": "1.1.1.1",
+  "allowed_ips": "0.0.0.0/0"
+}
+```
+
+---
+
+### Behavior
+
+When called, the agent:
+
+1. Validates API token
+2. Finds the existing peer by `old_public_key` in `wg0.conf`
+3. Removes the old peer from runtime and config
+4. Adds the new peer with the same IP using:
+
+```bash id="cmd02"
+wg set wg0 peer <OLD_PUBLIC_KEY> remove
+wg set wg0 peer <NEW_PUBLIC_KEY> allowed-ips <IP>/32
+```
+
+5. Returns updated server configuration data
+
+---
+
+### Error Responses
+
+| Code | Condition |
+| ---- | --------- |
+| `400` | Missing `old_public_key` or `public_key`, or both keys are identical |
+| `404` | No peer found for `old_public_key` |
+| `409` | `public_key` is already assigned to another peer |
+
+---
+
+## 3. Health Check
 
 ### Endpoint
 
@@ -140,7 +222,7 @@ Returns node status for monitoring and registry heartbeat.
 
 ---
 
-## 3. List Peers
+## 4. List Peers
 
 ### Endpoint
 
@@ -196,11 +278,31 @@ Returns all active VPN peers on the node.
 
 ---
 
+### 404 Not Found
+
+```json id="err04"
+{
+  "error": "Peer not found"
+}
+```
+
+---
+
 ### 409 Conflict
 
 ```json id="err03"
 {
   "error": "No available IP addresses"
+}
+```
+
+---
+
+### 409 Conflict (Replace Peer)
+
+```json id="err05"
+{
+  "error": "public_key already in use"
 }
 ```
 
@@ -241,7 +343,7 @@ The agent:
 
 ## Example Usage
 
-### cURL Request
+### Add Peer
 
 ```bash id="curl01"
 curl -X POST http://<VPS_IP>:5000/add-peer \
@@ -254,13 +356,30 @@ curl -X POST http://<VPS_IP>:5000/add-peer \
 
 ---
 
+### Replace Peer
+
+```bash id="curl03"
+curl -X POST http://<VPS_IP>:5000/replace-peer \
+  -H "X-API-TOKEN: your_secret_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "old_public_key": "OLD_CLIENT_PUBLIC_KEY",
+    "public_key": "NEW_CLIENT_PUBLIC_KEY"
+  }'
+```
+
+---
+
 ### Response
 
 ```json id="curl02"
 {
   "status": "success",
-  "assigned_ip": "10.0.0.5",
-  "server_public_key": "SERVER_PUBLIC_KEY"
+  "client_ip": "10.0.0.5",
+  "server_public_key": "SERVER_PUBLIC_KEY",
+  "endpoint": "203.0.113.10:51820",
+  "dns": "1.1.1.1",
+  "allowed_ips": "0.0.0.0/0"
 }
 ```
 
@@ -279,6 +398,24 @@ sequenceDiagram
     VPSAgent->>VPSAgent: Allocate IP
     VPSAgent->>WireGuard: wg set peer
     VPSAgent-->>Backend: Assigned IP + Server Key
+```
+
+---
+
+### Replace Peer Flow
+
+```mermaid id="flow02"
+sequenceDiagram
+
+    participant Backend
+    participant VPSAgent
+    participant WireGuard
+
+    Backend->>VPSAgent: POST /replace-peer
+    VPSAgent->>VPSAgent: Find peer by old_public_key
+    VPSAgent->>WireGuard: wg set peer remove (old)
+    VPSAgent->>WireGuard: wg set peer (new, same IP)
+    VPSAgent-->>Backend: Client IP + Server Key
 ```
 
 ---
