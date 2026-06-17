@@ -219,7 +219,7 @@ Infrastructure provisioning, node management, WireGuard automation, and registry
 
 ### Frontend
 
-[EasyVPN-Frontend](https://github.com/Erebus9456/EasyVPN-Frontend)
+[EasyVPN-CLI](https://github.com/Erebus9456/EasyVPN-CLI)
 
 Administrative dashboard, node monitoring, provisioning workflows, and management UI.
 
